@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.netlify/
+
+# copie generate dal build Netlify
+site/*.py

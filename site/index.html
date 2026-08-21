@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CDG Quant Suite – Equity Amministrato Pro</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/browser@0.85.1/build/stlite.css" />
+  <style>
+    html, body, #root { height: 100%; margin: 0; }
+    #boot-msg {
+      position: fixed; inset: 0; display: flex; align-items: center;
+      justify-content: center; font-family: sans-serif; color: #94A3B8;
+      background: #0F172A; flex-direction: column; gap: 1rem;
+    }
+    #boot-msg .spinner {
+      width: 36px; height: 36px; border: 3px solid #334155;
+      border-top-color: #F59E0B; border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #boot-msg .subtitle { font-size: 0.8rem; color: #64748B; }
+  </style>
+</head>
+<body>
+  <div id="boot-msg">
+    <div class="spinner"></div>
+    <div>Avvio motore Python nel browser… (~30-60s al primo caricamento)</div>
+    <div class="subtitle">Download librerie scientifiche e moduli Quant Suite…</div>
+  </div>
+  <div id="root"></div>
+  <script type="module">
+    import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@0.85.1/build/stlite.js";
+
+    async function loadText(path) {
+      const res = await fetch(path);
+      if (!res.ok) throw new Error(`Impossibile caricare ${path}: ${res.status}`);
+      return await res.text();
+    }
+
+    const THEME_CONFIG = `[theme]
+base = "dark"
+primaryColor = "#F59E0B"
+backgroundColor = "#0F172A"
+secondaryBackgroundColor = "#1E293B"
+textColor = "#F8FAFC"
+linkColor = "#FBBF24"
+font = "IBM Plex Sans, sans-serif"
+codeFont = "IBM Plex Mono, monospace"
+borderColor = "#334155"
+`;
+
+    try {
+      const [
+        appPy,
+        factorEnginePy,
+        sectorEnginePy,
+        stockEnginePy,
+      ] = await Promise.all([
+        loadText("./streamlit_app.py"),
+        loadText("./factor_leadership_engine.py"),
+        loadText("./sector_rotation_engine.py"),
+        loadText("./stock_score_engine.py"),
+      ]);
+
+      await mount(
+        {
+          requirements: [
+            "numpy",
+            "pandas",
+            "scipy",
+            "scikit-learn",
+            "openpyxl",
+            "xlrd",
+          ],
+          entrypoint: "streamlit_app.py",
+          files: {
+            "streamlit_app.py": appPy,
+            "factor_leadership_engine.py": factorEnginePy,
+            "sector_rotation_engine.py": sectorEnginePy,
+            "stock_score_engine.py": stockEnginePy,
+            ".streamlit/config.toml": THEME_CONFIG,
+          },
+        },
+        document.getElementById("root")
+      );
+      document.getElementById("boot-msg").remove();
+    } catch (err) {
+      const msg = document.getElementById("boot-msg");
+      msg.querySelector(".spinner").style.display = "none";
+      msg.querySelector(".subtitle").style.display = "none";
+      msg.childNodes[2].textContent = "Errore avvio app: " + err.message;
+      console.error(err);
+    }
+  </script>
+</body>
+</html>
