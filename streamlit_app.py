@@ -398,37 +398,39 @@ def stock_score_page():
         sector_cols = list(sector_prices.columns)
 
     st.subheader("3. Mappatura titolo → settore")
-    # Build a stable cache key so the base DataFrame is only recomputed when
-    # the underlying inputs (asset list or sector columns) actually change.
-    # This prevents the data_editor from seeing "new" data on every rerun
-    # (which would discard pending user edits to the sector mapping).
+    # Ricalcola la mappatura base solo quando cambiano titoli o colonne settoriali.
     _mapping_inputs_key = (tuple(stock_prices.columns), tuple(sector_cols))
-    if st.session_state.get("_stock_mapping_inputs_key") != _mapping_inputs_key:
+    if (st.session_state.get("_stock_mapping_inputs_key") != _mapping_inputs_key
+            or "stock_mapping" not in st.session_state):
         st.session_state["_stock_mapping_inputs_key"] = _mapping_inputs_key
-        st.session_state["_stock_mapping_base"] = _initial_mapping(
+        st.session_state["stock_mapping"] = _initial_mapping(
             list(stock_prices.columns),
             sector_cols,
             st.session_state.get("stock_mapping"),
         )
-        # Clear stale widget edit-deltas tied to the old base
-        st.session_state.pop("stock_mapping_editor", None)
 
-    mapping = st.data_editor(
-        st.session_state["_stock_mapping_base"],
-        hide_index=True,
-        use_container_width=True,
-        disabled=["Asset"],
-        column_config={
-            "Asset": st.column_config.TextColumn("Titolo"),
-            "Sector_Benchmark": st.column_config.SelectboxColumn(
-                "Benchmark settoriale",
-                options=sector_cols,
-                required=True,
-            ),
-        },
-        key="stock_mapping_editor",
-    )
-    st.session_state["stock_mapping"] = mapping
+    # Il form impedisce rerun intermedi: l'utente può modificare tutti i
+    # settori che desidera e confermare in un colpo solo, senza reset.
+    with st.form("stock_mapping_form"):
+        edited_mapping = st.data_editor(
+            st.session_state["stock_mapping"],
+            hide_index=True,
+            use_container_width=True,
+            disabled=["Asset"],
+            column_config={
+                "Asset": st.column_config.TextColumn("Titolo"),
+                "Sector_Benchmark": st.column_config.SelectboxColumn(
+                    "Benchmark settoriale",
+                    options=sector_cols,
+                    required=True,
+                ),
+            },
+        )
+        if st.form_submit_button("✅ Conferma mappatura", type="primary", use_container_width=True):
+            st.session_state["stock_mapping"] = edited_mapping
+            st.rerun()
+
+    mapping = st.session_state["stock_mapping"]
 
     top5_from_sector = [s for s in st.session_state.get("sector_top5", []) if s in sector_cols]
     default_eligible = top5_from_sector if top5_from_sector else sector_cols
@@ -436,6 +438,7 @@ def stock_score_page():
         "Settori eleggibili (di norma i Top 5 del CDG Sector Rotation)",
         options=sector_cols,
         default=default_eligible,
+        key="stock_eligible_sectors",
     )
 
     st.subheader("4. Parametri Stock Score")
