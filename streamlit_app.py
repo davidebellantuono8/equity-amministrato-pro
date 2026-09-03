@@ -398,13 +398,23 @@ def stock_score_page():
         sector_cols = list(sector_prices.columns)
 
     st.subheader("3. Mappatura titolo → settore")
-    mapping_base = _initial_mapping(
-        list(stock_prices.columns),
-        sector_cols,
-        st.session_state.get("stock_mapping"),
-    )
+    # Build a stable cache key so the base DataFrame is only recomputed when
+    # the underlying inputs (asset list or sector columns) actually change.
+    # This prevents the data_editor from seeing "new" data on every rerun
+    # (which would discard pending user edits to the sector mapping).
+    _mapping_inputs_key = (tuple(stock_prices.columns), tuple(sector_cols))
+    if st.session_state.get("_stock_mapping_inputs_key") != _mapping_inputs_key:
+        st.session_state["_stock_mapping_inputs_key"] = _mapping_inputs_key
+        st.session_state["_stock_mapping_base"] = _initial_mapping(
+            list(stock_prices.columns),
+            sector_cols,
+            st.session_state.get("stock_mapping"),
+        )
+        # Clear stale widget edit-deltas tied to the old base
+        st.session_state.pop("stock_mapping_editor", None)
+
     mapping = st.data_editor(
-        mapping_base,
+        st.session_state["_stock_mapping_base"],
         hide_index=True,
         use_container_width=True,
         disabled=["Asset"],
