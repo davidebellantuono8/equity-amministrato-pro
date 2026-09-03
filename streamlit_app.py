@@ -119,10 +119,10 @@ def score_color(v):
     if pd.isna(v):
         return ""
     if v >= 70:
-        return "background-color: #dff3e4"
+        return "background-color: #dff3e4; color: #000000;"
     if v <= 30:
-        return "background-color: #fde2e2"
-    return "background-color: #fff7d6"
+        return "background-color: #fde2e2; color: #000000;"
+    return "background-color: #fff7d6; color: #000000;"
 
 
 # -----------------------------------------------------------------------------
@@ -440,8 +440,14 @@ def stock_score_page():
     mapping = st.session_state["_stock_mapping_base"].copy()
     edits = st.session_state.get("stock_mapping_editor", {}).get("edited_rows", {})
     for row_idx, row_edits in edits.items():
-        for col, val in row_edits.items():
-            mapping.iat[row_idx, mapping.columns.get_loc(col)] = val
+        try:
+            # Assicuriamoci che row_idx sia intero, Pyodide a volte converte in stringa
+            idx = int(row_idx)
+            for col, val in row_edits.items():
+                col_loc = mapping.columns.get_loc(col)
+                mapping.iat[idx, col_loc] = val
+        except Exception as e:
+            pass
             
     st.session_state["stock_mapping"] = mapping
 
