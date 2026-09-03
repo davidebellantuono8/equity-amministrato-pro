@@ -362,12 +362,18 @@ def stock_score_page():
 
     st.subheader("2. Benchmark settoriali")
     sector_in_session = "sector_prices" in st.session_state
+    
+    # Inizializza il default di use_session solo la prima volta
+    if "stock_use_session" not in st.session_state:
+        st.session_state["stock_use_session"] = sector_in_session
+
     use_session = st.checkbox(
         "Usa i dati già caricati nel CDG Sector Rotation",
-        value=sector_in_session,
+        key="stock_use_session",
         disabled=not sector_in_session,
     )
-    if use_session:
+    
+    if use_session and sector_in_session:
         sector_prices = st.session_state["sector_prices"]
         st.session_state["stock_sector_prices"] = sector_prices
         st.success("Benchmark settoriali collegati dalla pagina CDG Sector Rotation.")
@@ -409,54 +415,58 @@ def stock_score_page():
             st.session_state.get("stock_mapping"),
         )
 
-    # Il form impedisce rerun intermedi: l'utente può modificare tutti i
-    # settori che desidera e confermare in un colpo solo, senza reset.
-    with st.form("stock_mapping_form"):
-        edited_mapping = st.data_editor(
-            st.session_state["stock_mapping"],
-            hide_index=True,
-            use_container_width=True,
-            disabled=["Asset"],
-            column_config={
-                "Asset": st.column_config.TextColumn("Titolo"),
-                "Sector_Benchmark": st.column_config.SelectboxColumn(
-                    "Benchmark settoriale",
-                    options=sector_cols,
-                    required=True,
-                ),
-            },
-        )
-        if st.form_submit_button("✅ Conferma mappatura", type="primary", use_container_width=True):
-            st.session_state["stock_mapping"] = edited_mapping
-            st.rerun()
-
-    mapping = st.session_state["stock_mapping"]
+    # Rimuoviamo il form. st.data_editor restituisce il DF con le modifiche.
+    # Grazie a st.session_state["stock_mapping"], le modifiche sono permanenti.
+    mapping = st.data_editor(
+        st.session_state["stock_mapping"],
+        hide_index=True,
+        use_container_width=True,
+        disabled=["Asset"],
+        column_config={
+            "Asset": st.column_config.TextColumn("Titolo"),
+            "Sector_Benchmark": st.column_config.SelectboxColumn(
+                "Benchmark settoriale",
+                options=sector_cols,
+                required=True,
+            ),
+        },
+        key="stock_mapping_editor",
+    )
+    # Aggiorna il session_state base con le modifiche applicate per salvarle
+    st.session_state["stock_mapping"] = mapping
 
     top5_from_sector = [s for s in st.session_state.get("sector_top5", []) if s in sector_cols]
     default_eligible = top5_from_sector if top5_from_sector else sector_cols
+    
+    # Previene l'errore di Streamlit sui default se cambiano i sector_cols
+    curr_eligible = st.session_state.get("stock_eligible_sectors", default_eligible)
+    valid_curr_eligible = [s for s in curr_eligible if s in sector_cols]
+    if not valid_curr_eligible:
+        valid_curr_eligible = default_eligible
+
     eligible = st.multiselect(
         "Settori eleggibili (di norma i Top 5 del CDG Sector Rotation)",
         options=sector_cols,
-        default=default_eligible,
+        default=valid_curr_eligible,
         key="stock_eligible_sectors",
     )
 
     st.subheader("4. Parametri Stock Score")
     p1, p2, p3, p4 = st.columns(4)
-    wrs = p1.number_input("RS vs settore", min_value=0.0, max_value=1.0, value=0.35, step=0.05, format="%.2f")
-    wm = p2.number_input("Momentum", min_value=0.0, max_value=1.0, value=0.25, step=0.05, format="%.2f")
-    wt = p3.number_input("Trend", min_value=0.0, max_value=1.0, value=0.20, step=0.05, format="%.2f")
-    wr = p4.number_input("Risk Quality", min_value=0.0, max_value=1.0, value=0.20, step=0.05, format="%.2f")
+    wrs = p1.number_input("RS vs settore", min_value=0.0, max_value=1.0, value=0.35, step=0.05, format="%.2f", key="ss_wrs")
+    wm = p2.number_input("Momentum", min_value=0.0, max_value=1.0, value=0.25, step=0.05, format="%.2f", key="ss_wm")
+    wt = p3.number_input("Trend", min_value=0.0, max_value=1.0, value=0.20, step=0.05, format="%.2f", key="ss_wt")
+    wr = p4.number_input("Risk Quality", min_value=0.0, max_value=1.0, value=0.20, step=0.05, format="%.2f", key="ss_wr")
 
     s1, s2, s3, s4 = st.columns(4)
-    top_per_sector = s1.number_input("Top titoli per settore", min_value=1, max_value=10, value=2, step=1)
-    max_total = s2.number_input("Massimo titoli finali", min_value=1, max_value=30, value=10, step=1)
-    min_days = s3.number_input("Minimo giorni storico", min_value=200, max_value=800, value=260, step=20)
-    optimizer_months = s4.number_input("Lookback export optimizer", min_value=6, max_value=36, value=12, step=1)
+    top_per_sector = s1.number_input("Top titoli per settore", min_value=1, max_value=10, value=2, step=1, key="ss_top_per_sector")
+    max_total = s2.number_input("Massimo titoli finali", min_value=1, max_value=30, value=10, step=1, key="ss_max_total")
+    min_days = s3.number_input("Minimo giorni storico", min_value=200, max_value=800, value=260, step=20, key="ss_min_days")
+    optimizer_months = s4.number_input("Lookback export optimizer", min_value=6, max_value=36, value=12, step=1, key="ss_opt_months")
 
     f1, f2 = st.columns(2)
-    require_rs = f1.checkbox("Escludi titoli con RS 6M vs settore ≤ 0", value=False)
-    require_ma = f2.checkbox("Escludi titoli sotto MA200", value=False)
+    require_rs = f1.checkbox("Escludi titoli con RS 6M vs settore ≤ 0", value=False, key="ss_req_rs")
+    require_ma = f2.checkbox("Escludi titoli sotto MA200", value=False, key="ss_req_ma")
 
     with st.expander("Dettaglio dei quattro blocchi", expanded=False):
         st.markdown(
