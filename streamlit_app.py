@@ -407,18 +407,21 @@ def stock_score_page():
     # Ricalcola la mappatura base solo quando cambiano titoli o colonne settoriali.
     _mapping_inputs_key = (tuple(stock_prices.columns), tuple(sector_cols))
     if (st.session_state.get("_stock_mapping_inputs_key") != _mapping_inputs_key
-            or "stock_mapping" not in st.session_state):
+            or "_stock_mapping_base" not in st.session_state):
         st.session_state["_stock_mapping_inputs_key"] = _mapping_inputs_key
-        st.session_state["stock_mapping"] = _initial_mapping(
+        st.session_state["_stock_mapping_base"] = _initial_mapping(
             list(stock_prices.columns),
             sector_cols,
             st.session_state.get("stock_mapping"),
         )
+        # Svuota gli edit precedenti se cambiano gli input base
+        if "stock_mapping_editor" in st.session_state:
+            del st.session_state["stock_mapping_editor"]
 
-    # Rimuoviamo il form. st.data_editor restituisce il DF con le modifiche.
-    # Grazie a st.session_state["stock_mapping"], le modifiche sono permanenti.
-    mapping = st.data_editor(
-        st.session_state["stock_mapping"],
+    # Visualizza la tabella fornendo SOLO il base stabile. Non assegniamo l'output
+    # direttamente in session_state per evitare loop continui di re-render in stlite.
+    st.data_editor(
+        st.session_state["_stock_mapping_base"],
         hide_index=True,
         use_container_width=True,
         disabled=["Asset"],
@@ -432,7 +435,14 @@ def stock_score_page():
         },
         key="stock_mapping_editor",
     )
-    # Aggiorna il session_state base con le modifiche applicate per salvarle
+
+    # Ricostruisce il mapping finale applicando gli edit salvati nel widget state
+    mapping = st.session_state["_stock_mapping_base"].copy()
+    edits = st.session_state.get("stock_mapping_editor", {}).get("edited_rows", {})
+    for row_idx, row_edits in edits.items():
+        for col, val in row_edits.items():
+            mapping.iat[row_idx, mapping.columns.get_loc(col)] = val
+            
     st.session_state["stock_mapping"] = mapping
 
     top5_from_sector = [s for s in st.session_state.get("sector_top5", []) if s in sector_cols]
