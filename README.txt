@@ -89,6 +89,19 @@ Microsoft → Information Technology
 JPMorgan → Financials
 Exxon → Energy
 
+Dalla v3.3 il benchmark viene PRECOMPILATO dal market data incorporato
+(market_data_settori.csv, ricavato da MARKET_DATA_AZIONI Q3 2026):
+- abbinamento per ISIN, poi nome (ignorando PLC/AG/SpA/Inc...), poi nome simile;
+- settori Morningstar convertiti in GICS (Technology → Information Technology,
+  Consumer Cyclical → Consumer Discretionary, Consumer Defensive → Consumer Staples,
+  Financial Services → Financials, Healthcare → Health Care, Basic Materials → Materials);
+- colonna "Abbinamento": Trovato / Da verificare (nome simile) /
+  Benchmark settore non caricato / Non trovato;
+- le correzioni manuali hanno sempre la priorità e restano anche cambiando modulo;
+- lo Stock Score non parte finché ci sono titoli senza benchmark.
+Un market data aggiornato (Excel/CSV con colonne Nome, ISIN, Settore) si può
+caricare dal riquadro "Market data settori" della sezione 3.
+
 STOCK SCORE DI DEFAULT
 ----------------------
 A) RELATIVE STRENGTH VS PROPRIO SETTORE – 35%

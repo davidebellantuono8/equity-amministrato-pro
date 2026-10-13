@@ -55,11 +55,15 @@ borderColor = "#334155"
         factorEnginePy,
         sectorEnginePy,
         stockEnginePy,
+        marketDataPy,
+        marketDataCsv,
       ] = await Promise.all([
         loadText("./streamlit_app.py"),
         loadText("./factor_leadership_engine.py"),
         loadText("./sector_rotation_engine.py"),
         loadText("./stock_score_engine.py"),
+        loadText("./market_data_sectors.py"),
+        loadText("./market_data_settori.csv"),
       ]);
 
       await mount(
@@ -78,6 +82,8 @@ borderColor = "#334155"
             "factor_leadership_engine.py": factorEnginePy,
             "sector_rotation_engine.py": sectorEnginePy,
             "stock_score_engine.py": stockEnginePy,
+            "market_data_sectors.py": marketDataPy,
+            "market_data_settori.csv": marketDataCsv,
             ".streamlit/config.toml": THEME_CONFIG,
           },
         },

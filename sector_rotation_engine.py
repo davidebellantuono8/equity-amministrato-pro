@@ -308,8 +308,15 @@ def _pick_price_column(candidates: Dict[str, pd.Series]) -> Optional[str]:
     return next(iter(candidates))
 
 
-def _auto_alias(name: str, source_stem: str = "") -> str:
+def _auto_alias(name: str, source_stem: str = "", alias_names: bool = True) -> str:
     n = _norm(name)
+
+    # 0) Single stocks: keep the real name ("Infineon Technologies AG" must not become
+    #    "Information Technology"); only generic price headers fall back to the file name.
+    if not alias_names:
+        if n in {"close", "adj close", "adjusted close", "price", "prezzo", "last", "nav", "value", "valore"} and source_stem:
+            return source_stem
+        return _clean_col_name(name)
 
     # 1) Sector ETFs: preserve the sector alias even if "MSCI World" is in the fund name.
     for pat, alias in _SECTOR_ALIASES:
@@ -356,7 +363,7 @@ def _read_csv_raw(path: Path) -> pd.DataFrame:
     raise ValueError("Impossibile leggere il CSV. " + " | ".join(errors[-2:]))
 
 
-def _parse_table(df: pd.DataFrame, source: str, sheet: str = "") -> Tuple[List[pd.DataFrame], List[dict], List[str]]:
+def _parse_table(df: pd.DataFrame, source: str, sheet: str = "", alias_names: bool = True) -> Tuple[List[pd.DataFrame], List[dict], List[str]]:
     warnings_list: List[str] = []
     if df is None or df.empty:
         return [], [], [f"{source}{' / ' + sheet if sheet else ''}: foglio vuoto."]
@@ -403,7 +410,7 @@ def _parse_table(df: pd.DataFrame, source: str, sheet: str = "") -> Tuple[List[p
                 frames.append(one)
                 meta.append({
                     "original_name": str(c),
-                    "suggested_name": _auto_alias(str(c), Path(source).stem),
+                    "suggested_name": _auto_alias(str(c), Path(source).stem, alias_names),
                     "source_file": source,
                     "sheet": sheet,
                     "source_column": price_col,
@@ -428,7 +435,7 @@ def _parse_table(df: pd.DataFrame, source: str, sheet: str = "") -> Tuple[List[p
         frames.append(x)
         meta.append({
             "original_name": chosen,
-            "suggested_name": _auto_alias(chosen, Path(source).stem),
+            "suggested_name": _auto_alias(chosen, Path(source).stem, alias_names),
             "source_file": source,
             "sheet": sheet,
             "source_column": chosen,
@@ -451,7 +458,7 @@ def _parse_table(df: pd.DataFrame, source: str, sheet: str = "") -> Tuple[List[p
         frames.append(x)
         meta.append({
             "original_name": c,
-            "suggested_name": _auto_alias(c, Path(source).stem),
+            "suggested_name": _auto_alias(c, Path(source).stem, alias_names),
             "source_file": source,
             "sheet": sheet,
             "source_column": c,
@@ -464,7 +471,7 @@ def _parse_table(df: pd.DataFrame, source: str, sheet: str = "") -> Tuple[List[p
     return frames, meta, warnings_list
 
 
-def import_price_files(paths: Iterable[str | Path]) -> ImportBundle:
+def import_price_files(paths: Iterable[str | Path], alias_names: bool = True) -> ImportBundle:
     paths = [Path(p) for p in paths]
     if not paths:
         raise ValueError("Nessun file selezionato.")
@@ -481,14 +488,14 @@ def import_price_files(paths: Iterable[str | Path]) -> ImportBundle:
         try:
             if ext == ".csv" or ext == ".txt":
                 df = _read_csv_raw(path)
-                frames, meta, warns = _parse_table(df, path.name)
+                frames, meta, warns = _parse_table(df, path.name, alias_names=alias_names)
                 raw_series.extend(frames)
                 raw_meta.extend(meta)
                 all_warnings.extend(warns)
             elif ext in {".xlsx", ".xls", ".xlsm"}:
                 book = pd.read_excel(path, sheet_name=None, dtype=object)
                 for sheet_name, df in book.items():
-                    frames, meta, warns = _parse_table(df, path.name, str(sheet_name))
+                    frames, meta, warns = _parse_table(df, path.name, str(sheet_name), alias_names=alias_names)
                     raw_series.extend(frames)
                     raw_meta.extend(meta)
                     all_warnings.extend(warns)

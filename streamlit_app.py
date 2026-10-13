@@ -25,6 +25,15 @@ from factor_leadership_engine import (
     evaluate_markowitz_alignment,
     factor_result_to_excel_bytes,
 )
+from market_data_sectors import (
+    STATUS_FOUND,
+    STATUS_FUZZY,
+    STATUS_NO_BENCH,
+    STATUS_NOT_FOUND,
+    load_default_market_data,
+    load_market_data,
+    suggest_sectors,
+)
 
 
 APP_TITLE = "CDG Quant Suite"
@@ -56,12 +65,12 @@ def _save_uploads_to_temp(uploaded_files: Iterable) -> tuple[tempfile.TemporaryD
     return td, paths
 
 
-def import_uploaded_price_files(uploaded_files) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+def import_uploaded_price_files(uploaded_files, alias_names: bool = True) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     if not uploaded_files:
         raise ValueError("Seleziona almeno un file CSV/Excel.")
     td, paths = _save_uploads_to_temp(uploaded_files)
     try:
-        bundle = import_price_files(paths)
+        bundle = import_price_files(paths, alias_names=alias_names)
         return bundle.prices, bundle.metadata, bundle.warnings
     finally:
         td.cleanup()
@@ -308,15 +317,71 @@ def sector_rotation_page():
 # Stock Score page
 # -----------------------------------------------------------------------------
 
-def _initial_mapping(assets: list[str], sector_cols: list[str], old: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    old_map = {}
-    if old is not None and not old.empty and {"Asset", "Sector_Benchmark"}.issubset(old.columns):
-        old_map = old.set_index("Asset")["Sector_Benchmark"].to_dict()
-    default_sector = sector_cols[0] if sector_cols else ""
-    return pd.DataFrame({
-        "Asset": assets,
-        "Sector_Benchmark": [old_map.get(a, default_sector) if old_map.get(a, default_sector) in sector_cols else default_sector for a in assets],
-    })
+_MATCH_LABELS = {
+    STATUS_FOUND: "✓ Trovato",
+    STATUS_FUZZY: "? Da verificare (nome simile)",
+    STATUS_NO_BENCH: "! Benchmark settore non caricato",
+    STATUS_NOT_FOUND: "✗ Non trovato: assegna a mano",
+}
+
+# Widget della pagina Stock Score da conservare quando si cambia modulo dalla sidebar:
+# Streamlit elimina lo stato dei widget non visualizzati, quindi l'ultimo valore viene salvato
+# in una chiave separata e ripassato come valore iniziale. La chiave del widget non viene mai
+# scritta via Session State (lascerebbe un valore vecchio che prevale al ritorno sulla pagina).
+def _kept(key: str, default):
+    return st.session_state.get(f"_keep_{key}", default)
+
+
+def _keep(key: str, value):
+    st.session_state[f"_keep_{key}"] = value
+    return value
+
+
+@st.cache_data(show_spinner=False)
+def _cached_default_market_data() -> Optional[pd.DataFrame]:
+    return load_default_market_data()
+
+
+def _active_market_data() -> tuple[Optional[pd.DataFrame], str]:
+    if "stock_market_data" in st.session_state:
+        return st.session_state["stock_market_data"], st.session_state.get("stock_market_data_name", "caricato")
+    try:
+        return _cached_default_market_data(), "incorporato"
+    except Exception:
+        return None, "non disponibile"
+
+
+def _initial_mapping(
+    assets: list[str],
+    sector_cols: list[str],
+    suggestions: pd.DataFrame,
+    old: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Benchmark precompilato dal market data; le correzioni manuali precedenti hanno la priorità."""
+    manual = {}
+    if old is not None and not old.empty and {"Asset", "Sector_Benchmark", "Manual"}.issubset(old.columns):
+        m = old[old["Manual"].astype(bool)]
+        manual = m.set_index("Asset")["Sector_Benchmark"].to_dict()
+    sug = suggestions.set_index("Asset")
+    rows = []
+    for a in assets:
+        s = sug.loc[a] if a in sug.index else None
+        suggested = s["Suggested_Benchmark"] if s is not None else None
+        status = s["Match_Status"] if s is not None else STATUS_NOT_FOUND
+        if manual.get(a) in sector_cols:
+            bench = manual[a]
+        else:
+            bench = suggested if suggested in sector_cols else None
+        md_info = ""
+        if s is not None and s["MD_Settore"]:
+            md_info = s["MD_Settore"] if s["MD_Nome"] == a else f"{s['MD_Settore']} ({s['MD_Nome']})"
+        rows.append({
+            "Asset": a,
+            "Sector_Benchmark": bench,
+            "MD_Info": md_info,
+            "Match": _MATCH_LABELS.get(status, status),
+        })
+    return pd.DataFrame(rows, columns=["Asset", "Sector_Benchmark", "MD_Info", "Match"])
 
 
 def stock_score_page():
@@ -341,7 +406,8 @@ def stock_score_page():
     )
     if st.button("Importa titoli", type="primary"):
         try:
-            stock_prices, stock_meta, stock_warn = import_uploaded_price_files(stock_uploads)
+            with st.spinner("Import titoli in corso (un Excel grande può richiedere alcuni secondi)..."):
+                stock_prices, stock_meta, stock_warn = import_uploaded_price_files(stock_uploads, alias_names=False)
             st.session_state["stock_prices"] = stock_prices
             st.session_state["stock_metadata"] = stock_meta
             st.session_state["stock_warnings"] = stock_warn
@@ -363,15 +429,12 @@ def stock_score_page():
     st.subheader("2. Benchmark settoriali")
     sector_in_session = "sector_prices" in st.session_state
     
-    # Inizializza il default di use_session solo la prima volta
-    if "stock_use_session" not in st.session_state:
-        st.session_state["stock_use_session"] = sector_in_session
-
-    use_session = st.checkbox(
+    use_session = _keep("stock_use_session", st.checkbox(
         "Usa i dati già caricati nel CDG Sector Rotation",
+        value=_kept("stock_use_session", sector_in_session),
         key="stock_use_session",
         disabled=not sector_in_session,
-    )
+    ))
     
     if use_session and sector_in_session:
         sector_prices = st.session_state["sector_prices"]
@@ -404,27 +467,72 @@ def stock_score_page():
         sector_cols = list(sector_prices.columns)
 
     st.subheader("3. Mappatura titolo → settore")
-    # Ricalcola la mappatura base solo quando cambiano titoli o colonne settoriali.
-    _mapping_inputs_key = (tuple(stock_prices.columns), tuple(sector_cols))
+    market_data, md_source = _active_market_data()
+    with st.expander("Market data settori", expanded=False):
+        if market_data is None:
+            st.warning("Nessun market data disponibile: i settori vanno assegnati a mano.")
+        else:
+            st.caption(f"Market data {md_source}: {len(market_data)} titoli. Il settore viene precompilato "
+                       "abbinando ISIN, nome o nome simile; i settori Morningstar sono convertiti nei benchmark GICS.")
+        md_upload = st.file_uploader(
+            "Carica un market data aggiornato (Excel/CSV con colonne Nome, ISIN, Settore)",
+            type=["csv", "txt", "xlsx", "xls", "xlsm"],
+            key="stock_md_upload",
+        )
+        c_md1, c_md2 = st.columns(2)
+        if c_md1.button("Usa questo market data", disabled=md_upload is None):
+            try:
+                td, paths = _save_uploads_to_temp([md_upload])
+                try:
+                    st.session_state["stock_market_data"] = load_market_data(paths[0])
+                finally:
+                    td.cleanup()
+                st.session_state["stock_market_data_name"] = f"caricato ({md_upload.name})"
+                st.session_state.pop("_stock_mapping_inputs_key", None)
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+        if c_md2.button("Torna al market data incorporato", disabled="stock_market_data" not in st.session_state):
+            st.session_state.pop("stock_market_data", None)
+            st.session_state.pop("stock_market_data_name", None)
+            st.session_state.pop("_stock_mapping_inputs_key", None)
+            st.rerun()
+
+    # Ricalcola la mappatura base quando cambiano titoli, settori o market data, e quando lo stato
+    # dell'editor è stato eliminato (cambio modulo): in quel caso riparte dall'ultima mappatura salvata.
+    assets = list(stock_prices.columns)
+    _mapping_inputs_key = (tuple(assets), tuple(sector_cols), md_source)
+    run_id = st.session_state.get("_run_id", 0)
+    editor_was_shown = st.session_state.get("_stock_editor_last_run") == run_id - 1
     if (st.session_state.get("_stock_mapping_inputs_key") != _mapping_inputs_key
-            or "_stock_mapping_base" not in st.session_state):
+            or "_stock_mapping_base" not in st.session_state
+            or not editor_was_shown):
+        suggestions = suggest_sectors(assets, sector_cols, market_data, st.session_state.get("stock_metadata"))
         st.session_state["_stock_mapping_inputs_key"] = _mapping_inputs_key
+        st.session_state["_stock_mapping_suggested"] = suggestions.set_index("Asset")["Suggested_Benchmark"].to_dict()
         st.session_state["_stock_mapping_base"] = _initial_mapping(
-            list(stock_prices.columns),
+            assets,
             sector_cols,
+            suggestions,
             st.session_state.get("stock_mapping"),
         )
-        # Svuota gli edit precedenti se cambiano gli input base
-        if "stock_mapping_editor" in st.session_state:
-            del st.session_state["stock_mapping_editor"]
+        st.session_state.pop("stock_mapping_editor", None)
+
+    base = st.session_state["_stock_mapping_base"]
+    counts = base["Match"].value_counts()
+    n_ok = int(counts.get(_MATCH_LABELS[STATUS_FOUND], 0))
+    n_fuzzy = int(counts.get(_MATCH_LABELS[STATUS_FUZZY], 0))
+    n_missing = len(base) - n_ok - n_fuzzy
+    st.caption(f"Precompilati dal market data: {n_ok} · da verificare: {n_fuzzy} · da assegnare a mano: {n_missing}. "
+               "Controlla la colonna Benchmark settoriale e correggi dove serve.")
 
     # Visualizza la tabella fornendo SOLO il base stabile. Non assegniamo l'output
     # direttamente in session_state per evitare loop continui di re-render in stlite.
     st.data_editor(
-        st.session_state["_stock_mapping_base"],
+        base,
         hide_index=True,
         use_container_width=True,
-        disabled=["Asset"],
+        disabled=["Asset", "MD_Info", "Match"],
         column_config={
             "Asset": st.column_config.TextColumn("Titolo"),
             "Sector_Benchmark": st.column_config.SelectboxColumn(
@@ -432,57 +540,60 @@ def stock_score_page():
                 options=sector_cols,
                 required=True,
             ),
+            "MD_Info": st.column_config.TextColumn("Settore market data"),
+            "Match": st.column_config.TextColumn("Abbinamento"),
         },
         key="stock_mapping_editor",
     )
+    st.session_state["_stock_editor_last_run"] = run_id
 
     # Ricostruisce il mapping finale applicando gli edit salvati nel widget state
-    mapping = st.session_state["_stock_mapping_base"].copy()
+    mapping = base[["Asset", "Sector_Benchmark"]].copy()
     edits = st.session_state.get("stock_mapping_editor", {}).get("edited_rows", {})
     for row_idx, row_edits in edits.items():
-        try:
-            # Assicuriamoci che row_idx sia intero, Pyodide a volte converte in stringa
-            idx = int(row_idx)
-            for col, val in row_edits.items():
-                col_loc = mapping.columns.get_loc(col)
-                mapping.iat[idx, col_loc] = val
-        except Exception as e:
-            pass
-            
+        # Pyodide può restituire l'indice di riga come stringa
+        idx = int(row_idx)
+        if "Sector_Benchmark" in row_edits:
+            mapping.iat[idx, mapping.columns.get_loc("Sector_Benchmark")] = row_edits["Sector_Benchmark"]
+    suggested = st.session_state.get("_stock_mapping_suggested", {})
+    mapping["Manual"] = [
+        pd.notna(b) and b != suggested.get(a) for a, b in zip(mapping["Asset"], mapping["Sector_Benchmark"])
+    ]
     st.session_state["stock_mapping"] = mapping
+
+    unassigned = mapping.loc[mapping["Sector_Benchmark"].isna(), "Asset"].tolist()
+    if unassigned:
+        st.warning(f"{len(unassigned)} titoli senza benchmark settoriale: " + ", ".join(unassigned[:15])
+                   + (" …" if len(unassigned) > 15 else ""))
 
     top5_from_sector = [s for s in st.session_state.get("sector_top5", []) if s in sector_cols]
     default_eligible = top5_from_sector if top5_from_sector else sector_cols
-    
-    # Previene l'errore di Streamlit sui default se cambiano i sector_cols
-    curr_eligible = st.session_state.get("stock_eligible_sectors", default_eligible)
-    valid_curr_eligible = [s for s in curr_eligible if s in sector_cols]
-    if not valid_curr_eligible:
-        valid_curr_eligible = default_eligible
 
-    eligible = st.multiselect(
+    # Ripristina la selezione dopo un cambio modulo, scartando settori non più presenti.
+    kept_eligible = [s for s in _kept("stock_eligible_sectors", []) if s in sector_cols]
+    eligible = _keep("stock_eligible_sectors", st.multiselect(
         "Settori eleggibili (di norma i Top 5 del CDG Sector Rotation)",
         options=sector_cols,
-        default=valid_curr_eligible,
+        default=kept_eligible or default_eligible,
         key="stock_eligible_sectors",
-    )
+    ))
 
     st.subheader("4. Parametri Stock Score")
     p1, p2, p3, p4 = st.columns(4)
-    wrs = p1.number_input("RS vs settore", min_value=0.0, max_value=1.0, value=0.35, step=0.05, format="%.2f", key="ss_wrs")
-    wm = p2.number_input("Momentum", min_value=0.0, max_value=1.0, value=0.25, step=0.05, format="%.2f", key="ss_wm")
-    wt = p3.number_input("Trend", min_value=0.0, max_value=1.0, value=0.20, step=0.05, format="%.2f", key="ss_wt")
-    wr = p4.number_input("Risk Quality", min_value=0.0, max_value=1.0, value=0.20, step=0.05, format="%.2f", key="ss_wr")
+    wrs = _keep("ss_wrs", p1.number_input("RS vs settore", min_value=0.0, max_value=1.0, value=_kept("ss_wrs", 0.35), step=0.05, format="%.2f", key="ss_wrs"))
+    wm = _keep("ss_wm", p2.number_input("Momentum", min_value=0.0, max_value=1.0, value=_kept("ss_wm", 0.25), step=0.05, format="%.2f", key="ss_wm"))
+    wt = _keep("ss_wt", p3.number_input("Trend", min_value=0.0, max_value=1.0, value=_kept("ss_wt", 0.20), step=0.05, format="%.2f", key="ss_wt"))
+    wr = _keep("ss_wr", p4.number_input("Risk Quality", min_value=0.0, max_value=1.0, value=_kept("ss_wr", 0.20), step=0.05, format="%.2f", key="ss_wr"))
 
     s1, s2, s3, s4 = st.columns(4)
-    top_per_sector = s1.number_input("Top titoli per settore", min_value=1, max_value=10, value=2, step=1, key="ss_top_per_sector")
-    max_total = s2.number_input("Massimo titoli finali", min_value=1, max_value=30, value=10, step=1, key="ss_max_total")
-    min_days = s3.number_input("Minimo giorni storico", min_value=200, max_value=800, value=260, step=20, key="ss_min_days")
-    optimizer_months = s4.number_input("Lookback export optimizer", min_value=6, max_value=36, value=12, step=1, key="ss_opt_months")
+    top_per_sector = _keep("ss_top_per_sector", s1.number_input("Top titoli per settore", min_value=1, max_value=10, value=_kept("ss_top_per_sector", 2), step=1, key="ss_top_per_sector"))
+    max_total = _keep("ss_max_total", s2.number_input("Massimo titoli finali", min_value=1, max_value=30, value=_kept("ss_max_total", 10), step=1, key="ss_max_total"))
+    min_days = _keep("ss_min_days", s3.number_input("Minimo giorni storico", min_value=200, max_value=800, value=_kept("ss_min_days", 260), step=20, key="ss_min_days"))
+    optimizer_months = _keep("ss_opt_months", s4.number_input("Lookback export optimizer", min_value=6, max_value=36, value=_kept("ss_opt_months", 12), step=1, key="ss_opt_months"))
 
     f1, f2 = st.columns(2)
-    require_rs = f1.checkbox("Escludi titoli con RS 6M vs settore ≤ 0", value=False, key="ss_req_rs")
-    require_ma = f2.checkbox("Escludi titoli sotto MA200", value=False, key="ss_req_ma")
+    require_rs = _keep("ss_req_rs", f1.checkbox("Escludi titoli con RS 6M vs settore ≤ 0", value=_kept("ss_req_rs", False), key="ss_req_rs"))
+    require_ma = _keep("ss_req_ma", f2.checkbox("Escludi titoli sotto MA200", value=_kept("ss_req_ma", False), key="ss_req_ma"))
 
     with st.expander("Dettaglio dei quattro blocchi", expanded=False):
         st.markdown(
@@ -502,7 +613,10 @@ def stock_score_page():
             """
         )
 
-    if st.button("ESEGUI CDG STOCK SCORE", type="primary", use_container_width=True):
+    run_clicked = st.button("ESEGUI CDG STOCK SCORE", type="primary", use_container_width=True)
+    if run_clicked and unassigned:
+        st.error("Assegna il benchmark settoriale a tutti i titoli (sezione 3) prima di eseguire lo Stock Score.")
+    elif run_clicked:
         try:
             cfg = StockScoreConfig(
                 weight_rs_sector=float(wrs),
@@ -1029,6 +1143,9 @@ with st.sidebar:
     )
     st.divider()
     st.caption("Configurazione operativa: dati daily, ribilanciamento mensile, score separato dall'allocazione Markowitz.")
+
+# Contatore dei run: permette alle pagine di sapere se un widget era visibile nel run precedente.
+st.session_state["_run_id"] = st.session_state.get("_run_id", 0) + 1
 
 if page == "CDG Sector Rotation":
     sector_rotation_page()

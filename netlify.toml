@@ -1,3 +1,3 @@
 [build]
-  command = "mkdir -p site && cp streamlit_app.py factor_leadership_engine.py sector_rotation_engine.py stock_score_engine.py site/"
+  command = "mkdir -p site && cp streamlit_app.py factor_leadership_engine.py sector_rotation_engine.py stock_score_engine.py market_data_sectors.py market_data_settori.csv site/"
   publish = "site"

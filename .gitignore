@@ -4,3 +4,11 @@ __pycache__/
 
 # copie generate dal build Netlify
 site/*.py
+site/*.csv
+
+# test e file temporanei locali
+check_app.py
+downloaded_*
+test_*.py
+*.xlsx
+-p/
