@@ -609,6 +609,61 @@ def _sample_daily_to_monthly(daily: pd.DataFrame, monthly_dates: pd.DatetimeInde
     return daily.sort_index().reindex(monthly_dates, method="ffill")
 
 
+def _per_asset_daily(daily: pd.DataFrame, fn, ffill_limit: int = 10) -> pd.DataFrame:
+    """Apply ``fn`` to each column on its own valid observations, then realign to the master
+    calendar (short forward-fill covers dates when only other instruments traded)."""
+    out = {}
+    for c in daily.columns:
+        s = daily[c].dropna()
+        if s.empty:
+            out[c] = pd.Series(np.nan, index=daily.index)
+            continue
+        out[c] = fn(s).reindex(daily.index).ffill(limit=ffill_limit)
+    return pd.DataFrame(out, index=daily.index, columns=daily.columns)
+
+
+def _diagnose_empty_selection(prices: pd.DataFrame, signals: Dict[str, pd.DataFrame],
+                              benchmark: str, cfg: ModelConfig) -> str:
+    comp = signals["composite_score"]
+    if comp.notna().any().any():
+        filtri = []
+        if cfg.require_positive_6m:
+            filtri.append("'Escludi Momentum 6M ≤ 0'")
+        if cfg.require_price_above_ma200:
+            filtri.append("'Escludi prezzo sotto MA200'")
+        return ("Nessun settore supera i filtri di eleggibilità in nessuna data"
+                + (f" ({' e '.join(filtri)})" if filtri else "") + ". Disattiva i filtri e riprova.")
+
+    mp = signals["monthly_prices"]
+    lines = [
+        "Composite Score non calcolabile in nessuna data: ogni componente deve essere disponibile "
+        "per almeno un settore nello stesso mese.",
+        f"Storico: {prices.index.min():%d/%m/%Y} → {prices.index.max():%d/%m/%Y} "
+        f"({len(mp)} mesi; servono almeno 13 mesi, consigliati 3 anni).",
+    ]
+    checks = {
+        "Momentum (3/6/12M)": "momentum_score",
+        f"Relative Strength vs benchmark '{benchmark}'": "rs_score",
+        "Trend (MA100/MA200, ≥160 osservazioni giornaliere)": "trend_score",
+        "Risk-adjusted (vol 126 giorni)": "risk_adj_score",
+    }
+    for label, key in checks.items():
+        ok = signals[key].notna().any(axis=1).sum()
+        lines.append(f"- {label}: {'OK' if ok else 'MANCANTE'} ({ok} mesi validi)")
+
+    bench_obs = prices[benchmark].dropna()
+    lines.append(
+        f"Benchmark '{benchmark}': {len(bench_obs)} osservazioni"
+        + (f" dal {bench_obs.index.min():%d/%m/%Y}" if not bench_obs.empty else "")
+        + ". Verifica che sia la serie corretta (es. MSCI World) e con storico sufficiente."
+    )
+    short = [c for c in prices.columns if c != benchmark and prices[c].notna().sum() < 260]
+    if short:
+        lines.append("Serie con meno di ~1 anno di dati giornalieri: " + ", ".join(map(str, short)) +
+                     ". Se i file sono settimanali/mensili, servono prezzi giornalieri.")
+    return "\n".join(lines)
+
+
 def compute_signals(prices: pd.DataFrame, benchmark: str, cfg: ModelConfig) -> Dict[str, pd.DataFrame]:
     cfg.validate()
     if benchmark not in prices.columns:
@@ -659,13 +714,21 @@ def compute_signals(prices: pd.DataFrame, benchmark: str, cfg: ModelConfig) -> D
         + cfg.rs_w_12m * rs_bounded(rs_12m, cfg.rs_scale_12m)
     )
 
-    # Trend on daily data
+    # Trend on daily data. Each asset is computed on its OWN trading calendar: with mixed
+    # calendars (EU/US ETFs, indices quoted on holidays/weekends) the union index has many
+    # NaN rows and a 200-row window would never reach min_periods -> Trend always NaN.
     daily_assets = p[assets]
-    ma100 = daily_assets.rolling(100, min_periods=80).mean()
-    ma200 = daily_assets.rolling(200, min_periods=160).mean()
-    above_ma100 = daily_assets / ma100 - 1
-    above_ma200 = daily_assets / ma200 - 1
-    slope_ma200 = (ma200 / ma200.shift(20)) ** (252.0 / 20.0) - 1
+
+    def _above_ma(window: int, min_p: int):
+        return lambda s: s / s.rolling(window, min_periods=min_p).mean() - 1
+
+    def _slope_ma200(s: pd.Series) -> pd.Series:
+        m = s.rolling(200, min_periods=160).mean()
+        return (m / m.shift(20)) ** (252.0 / 20.0) - 1
+
+    above_ma100 = _per_asset_daily(daily_assets, _above_ma(100, 80))
+    above_ma200 = _per_asset_daily(daily_assets, _above_ma(200, 160))
+    slope_ma200 = _per_asset_daily(daily_assets, _slope_ma200)
 
     monthly_dates = mp.index
     above_ma100_m = _sample_daily_to_monthly(above_ma100, monthly_dates)
@@ -678,8 +741,10 @@ def compute_signals(prices: pd.DataFrame, benchmark: str, cfg: ModelConfig) -> D
     )
 
     # Risk-adjusted momentum: 6M return / realized vol (126 trading days)
-    daily_ret = p[assets].pct_change(fill_method=None)
-    daily_vol_126 = daily_ret.rolling(126, min_periods=80).std(ddof=1) * np.sqrt(252)
+    daily_vol_126 = _per_asset_daily(
+        daily_assets,
+        lambda s: s.pct_change(fill_method=None).rolling(126, min_periods=80).std(ddof=1) * np.sqrt(252),
+    )
     vol_126_m = _sample_daily_to_monthly(daily_vol_126, monthly_dates)
     risk_adj_raw = mom_6m / vol_126_m.replace(0, np.nan)
     risk_adj_score = _pct_rank_0_100(risk_adj_raw)
@@ -1140,6 +1205,8 @@ def run_analysis(prices: pd.DataFrame, benchmark: str, cfg: Optional[ModelConfig
 
     signals = compute_signals(prices, benchmark, cfg)
     composite_selection = build_selection(signals, cfg, "composite_score")
+    if composite_selection.empty:
+        raise ValueError(_diagnose_empty_selection(prices, signals, benchmark, cfg))
     momentum_selection = build_selection(signals, cfg, "momentum_score")
 
     bt_comp = backtest_selection_ew(signals, composite_selection, benchmark, cfg, "Composite Top N EW")

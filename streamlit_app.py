@@ -247,6 +247,8 @@ def sector_rotation_page():
             st.session_state["sector_top5"] = top5
             st.session_state["sector_benchmark_selected"] = benchmark
             st.success("Modello completato.")
+        except ValueError as e:
+            st.error(str(e).replace("\n", "  \n"))
         except Exception as e:
             st.exception(e)
 
